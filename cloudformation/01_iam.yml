@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: IAM Roles and Policies for Glue Jobs and S3 Bucket for LOAD data
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+  Prefix:
+    Type: String
+    Default: lead
+
+Resources:
+
+  LOADBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Prefix}-elt-${AWS::AccountId}-${Environment}"
+ 
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-glue-job-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
+        - arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+
+  GlueJobPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${Prefix}-glue-job-inline-${Environment}"
+      Roles:
+        - !Ref GlueJobRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}"
+              - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}/*"
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecrets
+              - secretsmanager:TagResource
+            Resource: "*"
+
+        
+Outputs:
+
+  GlueJobRoleArn:
+    Value: !GetAtt GlueJobRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueJobRoleArn"
+
+  LOADBucketName:
+    Value: !Ref LOADBucket
+    Export:
+      Name: loadBucketName
