@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Glue jobs for ingesting, transforming, and applying data quality checks from SQL Server to Redshift
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: lead
+  Environment:
+    Type: String
+    Default: dev
+  S3Bucket:
+    Type: String
+    Default: lead-elt-657082399901-dev  #'s3://lead-elt-657082399901-dev/scripts/ingest-elt.py'
+  SqlServerSecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:657082399901:secret:connection_parameters_sqlserver-dev
+  GlueJobRoleArn:
+    Type: String
+    Default: arn:aws:iam::657082399901:role/lead-glue-job-role-dev
+
+Resources:
+
+  IngestJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "${Prefix}-ingest-${Environment}"
+      Role: !Ref GlueJobRoleArn
+      GlueVersion: 4.0
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Command:
+        Name: glueetl
+        PythonVersion: 3
+        ScriptLocation: !Sub 's3://${S3Bucket}/scripts/go-ingest-elt.py'
+      DefaultArguments:
+        "--job-language": "python"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--enable-glue-datacatalog": "true"
+        "--TempDir": !Sub 's3://${S3Bucket}/temp/'
+        "--LOAD_PATH": !Sub 's3://${S3Bucket}/landing/'
+        "--ERROR_PATH": !Sub 's3://${S3Bucket}/error/ingest/'
+
+  
+
+Outputs:
+  IngestJobName:
+    Description: Name of the Glue Ingest job
+    Value: !Ref IngestJob
+  
