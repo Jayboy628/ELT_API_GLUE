@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Glue jobs for ingesting, transforming, and applying data quality checks from SQL Server to Redshift
+Description: Glue job to ingest Close data using API key in Secrets Manager
 
 Parameters:
   Prefix:
@@ -10,40 +10,101 @@ Parameters:
     Default: dev
   S3Bucket:
     Type: String
-    Default: lead-elt-657082399901-dev  #'s3://lead-elt-657082399901-dev/scripts/ingest-elt.py'
-  SqlServerSecretArn:
-    Type: String
-    Default: arn:aws:secretsmanager:us-east-1:657082399901:secret:connection_parameters_sqlserver-dev
+    Default: lead-elt-657082399901-dev
   GlueJobRoleArn:
     Type: String
     Default: arn:aws:iam::657082399901:role/lead-glue-job-role-dev
+
+  # === Choose ONE of the following two approaches for SECRET_ID ===
+  # (A) Use the exported ARN from the secrets stack (recommended when stacks are separate)
+  ApiKeySecretArnExportName:
+    Type: String
+    Default: secrets-stack-ApiKeySecretArn
+    Description: Export name to import the API key secret ARN from the Secrets stack
+  # (B) Or pass the secret NAME directly if you prefer (script accepts name as well)
+  ApiKeySecretName:
+    Type: String
+    Default: api_key_closeio-dev
+    Description: Optional: secret name; if non-empty, overrides the imported ARN
+
+  # App arguments you might want parametric
+  ApiBaseUrl:
+    Type: String
+    Default: https://api.close.com/api/v1
+  S3OutputPrefix:
+    Type: String
+    Default: s3://lead-elt-657082399901-dev/landing/closeio/
+  OutputFormat:
+    Type: String
+    AllowedValues: [parquet, json]
+    Default: parquet
+  StartDate:
+    Type: String
+    Default: ""     # e.g. 2025-08-22
+  EndDate:
+    Type: String
+    Default: ""     # e.g. 2025-08-23
+  PageSize:
+    Type: Number
+    Default: 200
+  MaxPages:
+    Type: Number
+    Default: 500
+  FetchLeadDetails:
+    Type: String
+    AllowedValues: ["true","false"]
+    Default: "false"
+  LeadLimit:
+    Type: Number
+    Default: 0
+
+Mappings: {}
+
+Conditions:
+  UseNameInsteadOfArn: !Not [ !Equals [ !Ref ApiKeySecretName, "" ] ]
 
 Resources:
 
   IngestJob:
     Type: AWS::Glue::Job
     Properties:
-      Name: !Sub "${Prefix}-ingest-${Environment}"
+      Name: !Sub "${Prefix}-closeio-ingest-${Environment}"
       Role: !Ref GlueJobRoleArn
-      GlueVersion: 4.0
+      GlueVersion: "4.0"
       NumberOfWorkers: 2
       WorkerType: G.1X
       Command:
         Name: glueetl
-        PythonVersion: 3
-        ScriptLocation: !Sub 's3://${S3Bucket}/scripts/go-ingest-elt.py'
+        PythonVersion: "3"
+        # Update the script path if needed
+        ScriptLocation: !Sub "s3://${S3Bucket}/scripts/closeio_ingest_glue.py"
       DefaultArguments:
         "--job-language": "python"
         "--enable-continuous-cloudwatch-log": "true"
         "--enable-glue-datacatalog": "true"
-        "--TempDir": !Sub 's3://${S3Bucket}/temp/'
-        "--LOAD_PATH": !Sub 's3://${S3Bucket}/landing/'
-        "--ERROR_PATH": !Sub 's3://${S3Bucket}/error/ingest/'
+        "--enable-metrics": "true"
+        "--TempDir": !Sub "s3://${S3Bucket}/temp/"
 
-  
+        # === Script args (must all be strings) ===
+        "--SECRET_ID": !If
+          - UseNameInsteadOfArn
+          - !Ref ApiKeySecretName
+          - !ImportValue  # import the ARN from Secrets stack output
+            Fn::Sub: "${ApiKeySecretArnExportName}"
+
+        "--API_BASE_URL": !Ref ApiBaseUrl
+        "--S3_OUTPUT":    !Ref S3OutputPrefix
+        "--OUTPUT_FORMAT": !Ref OutputFormat
+
+        # Optional knobs (empty strings are fine; script defaults will kick in)
+        "--START_DATE": !Ref StartDate
+        "--END_DATE":   !Ref EndDate
+        "--PAGE_SIZE":  !Ref PageSize
+        "--MAX_PAGES":  !Ref MaxPages
+        "--FETCH_LEAD_DETAILS": !Ref FetchLeadDetails
+        "--LEAD_LIMIT": !Ref LeadLimit
 
 Outputs:
   IngestJobName:
     Description: Name of the Glue Ingest job
     Value: !Ref IngestJob
-  
