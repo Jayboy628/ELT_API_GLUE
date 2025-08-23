@@ -1,0 +1,34 @@
+name: Deploy Glue Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # (Optional) Runners already have AWS CLI v2; you can delete this block.
+      # - name: Verify AWS CLI
+      #   run: aws --version
+
+      - name: Make deploy script executable
+        run: chmod +x cloudformation/deploy_pipeline.sh
+
+      - name: Run deploy
+        env:
+          CLOSE_API_KEY: ${{ secrets.CLOSE_API_KEY }}   # <- your API key injected here
+        run: ./cloudformation/deploy_pipeline.sh
