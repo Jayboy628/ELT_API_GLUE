@@ -1,3 +1,6 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: IAM role for Glue (least privilege) – bucket exists already.
+
 Parameters:
   Environment:
     Type: String
@@ -7,29 +10,25 @@ Parameters:
     Default: lead
   ExistingBucketName:
     Type: String
-    Default: ""     # if non-empty, we will NOT create a bucket
-
-Conditions:
-  CreateBucket: !Equals [ !Ref ExistingBucketName, "" ]
+    Description: Name of an existing S3 bucket (required)
+  ApiSecretName:
+    Type: String
+    Default: api_key_closeio-dev
 
 Resources:
-  LOADBucket:
-    Condition: CreateBucket
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
+  GlueJobRole:
+    Type: AWS::IAM::Role
     Properties:
-      BucketName: !Sub "${Prefix}-elt-${AWS::AccountId}-${Environment}"
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      VersioningConfiguration:
-        Status: Enabled
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      RoleName: !Sub "${Prefix}-glue-job-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: glue.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Path: "/"
 
   GlueJobAccessPolicy:
     Type: AWS::IAM::Policy
@@ -42,8 +41,7 @@ Resources:
           - Sid: S3BucketLevel
             Effect: Allow
             Action: [ "s3:ListBucket", "s3:GetBucketLocation" ]
-            Resource:
-              !Join ["", ["arn:aws:s3:::", !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName ]]]
+            Resource: !Sub "arn:aws:s3:::${ExistingBucketName}"
           - Sid: S3ObjectLevel
             Effect: Allow
             Action:
@@ -52,15 +50,23 @@ Resources:
               - s3:AbortMultipartUpload
               - s3:ListBucketMultipartUploads
               - s3:ListMultipartUploadParts
-            Resource:
-              !Join ["", [
-                "arn:aws:s3:::",
-                !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName ],
-                "/*"
-              ]]
+            Resource: !Sub "arn:aws:s3:::${ExistingBucketName}/*"
+          - Sid: ReadCloseApiSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+            Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApiSecretName}*"
+          - Sid: KmsDecryptViaSM
+            Effect: Allow
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
 
 Outputs:
-  LOADBucketName:
-    Value: !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName]
+  GlueJobRoleArn:
+    Value: !GetAtt GlueJobRole.Arn
     Export:
-      Name: !Sub "${AWS::StackName}-LOADBucketName"
+      Name: !Sub "${AWS::StackName}-GlueJobRoleArn"
