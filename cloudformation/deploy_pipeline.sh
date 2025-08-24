@@ -120,28 +120,52 @@ echo
 # -------------------------
 # 03_gluejobs.yml (as provided) accepts both a secret ARN import OR a secret NAME.
 # We'll pass the NAME explicitly to avoid cross-stack import coupling.
+# echo "Deploying ${GLUE_STACK}..."
+# aws cloudformation deploy \
+#   --stack-name "${GLUE_STACK}" \
+#   --template-file "${CLOUDFORMATION_DIR}/03_gluejobs.yml" \
+#   --capabilities CAPABILITY_NAMED_IAM \
+#   --parameter-overrides \
+#       GlueJobRoleArn="${GLUE_JOB_ROLE_ARN}" \
+#       S3Bucket="${S3_BUCKET}" \
+#       Environment="${ENV}" \
+#       Prefix="${PREFIX}" \
+#       ApiKeySecretName="${SECRET_NAME}" \
+#       # Optional: override output prefix (else CFN default is fine)
+#       S3OutputPrefix="s3://${S3_BUCKET}/landing/closeio/" \
+#       # Optional: override API base
+#       ApiBaseUrl="https://api.close.com/api/v1" \
+#       # Optional: job defaults (comment out to use CFN defaults)
+#       OutputFormat="parquet" \
+#       PageSize="200" \
+#       MaxPages="500" \
+#       FetchLeadDetails="false" \
+#       LeadLimit="0" \
+#   --region "${REGION}"
+# echo
+
+# After deploying secrets-stack:
+API_SECRET_ARN=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='secrets-stack-ApiKeySecretArn'].Value | [0]" \
+  --output text)
+
+echo "Using API secret: ${API_SECRET_ARN}"
 echo "Deploying ${GLUE_STACK}..."
+
 aws cloudformation deploy \
-  --stack-name "${GLUE_STACK}" \
   --template-file "${CLOUDFORMATION_DIR}/03_gluejobs.yml" \
+  --stack-name "${GLUE_STACK}" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
-      GlueJobRoleArn="${GLUE_JOB_ROLE_ARN}" \
-      S3Bucket="${S3_BUCKET}" \
-      Environment="${ENV}" \
-      Prefix="${PREFIX}" \
-      ApiKeySecretName="${SECRET_NAME}" \
-      # Optional: override output prefix (else CFN default is fine)
-      S3OutputPrefix="s3://${S3_BUCKET}/landing/closeio/" \
-      # Optional: override API base
-      ApiBaseUrl="https://api.close.com/api/v1" \
-      # Optional: job defaults (comment out to use CFN defaults)
-      OutputFormat="parquet" \
-      PageSize="200" \
-      MaxPages="500" \
-      FetchLeadDetails="false" \
-      LeadLimit="0" \
+    GlueJobRoleArn="${GLUE_JOB_ROLE_ARN}" \
+    S3Bucket="${S3_BUCKET}" \
+    Environment="${ENV}" \
+    Prefix="${PREFIX}" \
+    ApiSecretArn="${API_SECRET_ARN}" \
   --region "${REGION}"
-echo
+
+
+
 
 echo "All stacks deployed successfully!"
