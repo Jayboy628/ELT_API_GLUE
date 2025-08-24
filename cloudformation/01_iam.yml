@@ -1,6 +1,3 @@
-AWSTemplateFormatVersion: 2010-09-09
-Description: IAM role for Glue and S3 bucket for Close/ELT data (least-priv + bucket hardening)
-
 Parameters:
   Environment:
     Type: String
@@ -8,16 +5,16 @@ Parameters:
   Prefix:
     Type: String
     Default: lead
-  # Name of the secret that holds {"api_key": "..."} (not the ARN).
-  # We wildcard the random suffix Secrets Manager appends.
-  ApiSecretName:
+  ExistingBucketName:
     Type: String
-    Default: api_key_closeio-dev
-    Description: Secrets Manager name (not ARN), e.g. api_key_closeio-dev
+    Default: ""     # if non-empty, we will NOT create a bucket
+
+Conditions:
+  CreateBucket: !Equals [ !Ref ExistingBucketName, "" ]
 
 Resources:
-
   LOADBucket:
+    Condition: CreateBucket
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
@@ -32,30 +29,7 @@ Resources:
         Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256       # switch to aws:kms + a CMK if you prefer
-      OwnershipControls:
-        Rules:
-          - ObjectOwnership: BucketOwnerPreferred
-      Tags:
-        - Key: Name
-          Value: !Sub "${Prefix}-elt-${AWS::AccountId}-${Environment}"
-
-  GlueJobRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${Prefix}-glue-job-role-${Environment}"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: glue.amazonaws.com
-            Action: sts:AssumeRole
-      # Keep the AWS-managed service role only; avoid console/full-access style policies
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
-      Path: "/"
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
 
   GlueJobAccessPolicy:
     Type: AWS::IAM::Policy
@@ -65,14 +39,11 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # ---- S3 least-privilege to this bucket ----
           - Sid: S3BucketLevel
             Effect: Allow
-            Action:
-              - s3:ListBucket
-              - s3:GetBucketLocation
+            Action: [ "s3:ListBucket", "s3:GetBucketLocation" ]
             Resource:
-              - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}"
+              !Join ["", ["arn:aws:s3:::", !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName ]]]
           - Sid: S3ObjectLevel
             Effect: Allow
             Action:
@@ -82,35 +53,14 @@ Resources:
               - s3:ListBucketMultipartUploads
               - s3:ListMultipartUploadParts
             Resource:
-              - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}/*"
-
-          # ---- Read one secret (name wildcard handles the random suffix) ----
-          - Sid: ReadCloseApiSecret
-            Effect: Allow
-            Action:
-              - secretsmanager:GetSecretValue
-              - secretsmanager:DescribeSecret
-            Resource:
-              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApiSecretName}*"
-
-          # If your secret uses a CMK (or you switch S3 to SSE-KMS), allow decrypt via service
-          - Sid: KmsDecryptForSecretsManager
-            Effect: Allow
-            Action: kms:Decrypt
-            Resource: "*"   # scope via ViaService; least-priv for SM usage
-            Condition:
-              StringEquals:
-                kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+              !Join ["", [
+                "arn:aws:s3:::",
+                !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName ],
+                "/*"
+              ]]
 
 Outputs:
-  GlueJobRoleArn:
-    Description: Glue job role ARN
-    Value: !GetAtt GlueJobRole.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-GlueJobRoleArn"
-
   LOADBucketName:
-    Description: S3 bucket name for ELT artifacts
-    Value: !Ref LOADBucket
+    Value: !If [CreateBucket, !Ref LOADBucket, !Ref ExistingBucketName]
     Export:
       Name: !Sub "${AWS::StackName}-LOADBucketName"
