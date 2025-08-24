@@ -1,9 +1,9 @@
 # closeio_ingest_glue.py
 # Glue 4.0 (Python 3.10). Ingest Close leads/activities using an API key from Secrets Manager.
 
-import sys, json, time, datetime as dt, base64, traceback
+import sys, json, time, datetime as dt, base64, traceback, os, random
 from typing import Dict, Any, Iterable, List, Optional
-import os
+
 import boto3
 import urllib3
 
@@ -22,14 +22,13 @@ args = getResolvedOptions(sys.argv, [
     "API_BASE_URL",       # e.g. https://api.close.com/api/v1
     "S3_OUTPUT",          # e.g. s3://your-bucket/landing/closeio/
     "OUTPUT_FORMAT",      # parquet | json
-
     # Optional knobs:
-    "START_DATE",         # e.g. 2025-08-22  (inclusive, local/UTC not critical for Close's fixed_local_date)
-    "END_DATE",           # e.g. 2025-08-23  (inclusive end-of-day loop)
+    "START_DATE",         # YYYY-MM-DD
+    "END_DATE",           # YYYY-MM-DD
     "PAGE_SIZE",          # default 200
-    "MAX_PAGES",          # safety cap per search request, default 500
-    "FETCH_LEAD_DETAILS", # true|false (default false)
-    "LEAD_LIMIT"          # for testing; positive int caps number of leads processed
+    "MAX_PAGES",          # default 500
+    "FETCH_LEAD_DETAILS", # true|false
+    "LEAD_LIMIT"          # int; 0 = no limit
 ])
 
 SECRET_ID     = args["SECRET_ID"]
@@ -42,7 +41,10 @@ END_DATE      = args.get("END_DATE") or None
 PAGE_SIZE     = int(args.get("PAGE_SIZE", "200"))
 MAX_PAGES     = int(args.get("MAX_PAGES", "500"))
 FETCH_LEAD_DETAILS = (args.get("FETCH_LEAD_DETAILS", "false").lower() == "true")
-LEAD_LIMIT    = int(args.get("LEAD_LIMIT", "0"))  # 0 = no limit
+LEAD_LIMIT    = int(args.get("LEAD_LIMIT", "0"))
+
+if OUTPUT_FORMAT not in ("parquet", "json"):
+    raise ValueError(f"OUTPUT_FORMAT must be parquet|json, got {OUTPUT_FORMAT!r}")
 
 # -----------------------
 # Glue setup
@@ -57,10 +59,13 @@ job.init(args["JOB_NAME"], args)
 # Helpers
 # -----------------------
 
+def backoff_sleep(attempt: int):
+    """Exponential backoff with jitter: 0.5s, 1s, 2s, 4s, 8s, 16s, capped."""
+    base = min(0.5 * (2 ** (attempt - 1)), 16.0)
+    time.sleep(base * (0.5 + random.random()))
 
 def get_api_key_from_secret(secret_id: str) -> str:
-    """Load Close API key from Secrets Manager.
-       Accepts either a raw string secret or JSON like {"api_key": "..."}."""
+    """Load Close API key from Secrets Manager (supports raw string or {"api_key": "..."} JSON)."""
     sm = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
     s = sm.get_secret_value(SecretId=secret_id)["SecretString"]
 
@@ -72,39 +77,34 @@ def get_api_key_from_secret(secret_id: str) -> str:
         elif isinstance(parsed, str):
             key = parsed
     except json.JSONDecodeError:
-        # Secret was a plain string
         key = s
 
     if not key:
         raise RuntimeError(f"Secret {secret_id} did not contain an API key")
 
     key = key.strip().strip('"').strip("'")
-    # If someone stored "key:" with a colon, strip it; we'll add the colon ourselves
     if key.endswith(":"):
         key = key[:-1]
     if not key:
         raise RuntimeError("API key from Secret is empty after normalization")
     return key
 
-def build_close_headers(api_key: str) -> dict:
+def build_close_headers(api_key: str) -> Dict[str, str]:
     """Close v1 uses HTTP Basic with API_KEY as username and empty password."""
     token = base64.b64encode(f"{api_key}:".encode("utf-8")).decode("ascii")
     return {
         "Authorization": f"Basic {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
-        # optional but helpful
         "User-Agent": "glue-closeio-ingest/1.0"
     }
 
-def verify_auth(http, base_url: str, headers: dict):
+def verify_auth(http: urllib3.PoolManager, base_url: str, headers: Dict[str, str]):
     """Fail fast if credentials are wrong."""
     url = base_url.rstrip("/") + "/me/"
-    resp = http.request("GET", url, headers=headers)
+    resp = http.request("GET", url, headers=headers, timeout=urllib3.Timeout(connect=10.0, read=30.0), retries=False)
     if resp.status != 200:
-        # Do not log the key; just the status / first bytes for debugging
         raise RuntimeError(f"Auth check failed: GET {url} -> {resp.status} {resp.data[:200]!r}")
-
 
 def date_range_days(start_date: dt.date, end_date: dt.date) -> Iterable[dt.date]:
     cur = start_date
@@ -117,13 +117,14 @@ def http_post_json(http: urllib3.PoolManager, url: str, headers: Dict[str, str],
     data = json.dumps(body).encode("utf-8")
     attempt = 0
     while True:
-        resp = http.request("POST", url, body=data, headers=headers, timeout=urllib3.Timeout(connect=10.0, read=60.0))
+        resp = http.request("POST", url, body=data, headers=headers,
+                            timeout=urllib3.Timeout(connect=10.0, read=60.0), retries=False)
         if resp.status == 429 or resp.status >= 500:
             attempt += 1
-            print(f"[WARN] POST {url} -> {resp.status}, retry attempt={attempt}")
-            backoff_sleep(attempt)
+            print(f"[WARN] POST {url} -> {resp.status}, attempt={attempt}")
             if attempt > 6:
                 raise RuntimeError(f"POST {url} failed after retries: {resp.status} {resp.data[:200]!r}")
+            backoff_sleep(attempt)
             continue
         if resp.status >= 400:
             raise RuntimeError(f"POST {url} failed: {resp.status} {resp.data[:200]!r}")
@@ -136,23 +137,21 @@ def http_get(http: urllib3.PoolManager, url: str, headers: Dict[str, str], param
         q = "?" + urlencode(params, doseq=True)
     attempt = 0
     while True:
-        resp = http.request("GET", url + q, headers=headers, timeout=urllib3.Timeout(connect=10.0, read=60.0))
+        resp = http.request("GET", url + q, headers=headers,
+                            timeout=urllib3.Timeout(connect=10.0, read=60.0), retries=False)
         if resp.status == 429 or resp.status >= 500:
             attempt += 1
-            print(f"[WARN] GET {url} -> {resp.status}, retry attempt={attempt}")
-            backoff_sleep(attempt)
+            print(f"[WARN] GET {url} -> {resp.status}, attempt={attempt}")
             if attempt > 6:
                 raise RuntimeError(f"GET {url} failed after retries: {resp.status} {resp.data[:200]!r}")
+            backoff_sleep(attempt)
             continue
         if resp.status >= 400:
             raise RuntimeError(f"GET {url} failed: {resp.status} {resp.data[:200]!r}")
         return json.loads(resp.data)
 
 def search_lead_ids_for_day(http, headers, day: dt.date, page_size: int, max_pages: int) -> List[str]:
-    """
-    Calls POST /data/search to get Lead IDs where date_updated is on 'day'.
-    Mirrors your original JSON query (fixed_local_date on start/end of day).
-    """
+    """POST /data/search for leads updated on the given day (fixed_local_date)."""
     url = f"{API_BASE_URL}/data/search/"
     lead_ids: List[str] = []
     cursor = None
@@ -205,16 +204,13 @@ def search_lead_ids_for_day(http, headers, day: dt.date, page_size: int, max_pag
     return lead_ids
 
 def fetch_all_activities_for_lead(http, headers, lead_id: str) -> List[Dict[str, Any]]:
-    """
-    GET /activity?lead_id=... with pagination using has_more + last item’s activity_at.
-    """
+    """GET /activity?lead_id=... paginate by has_more and last activity_at/date_created."""
     items: List[Dict[str, Any]] = []
     first = True
     cursor_time = None
     while True:
         params = {"lead_id": lead_id}
         if not first and cursor_time:
-            # Walk back in time
             params["date_created__lt"] = cursor_time
         resp = http_get(http, f"{API_BASE_URL}/activity/", headers, params)
         data = resp.get("data", [])
@@ -223,7 +219,6 @@ def fetch_all_activities_for_lead(http, headers, lead_id: str) -> List[Dict[str,
             break
         cursor_time = data[-1].get("activity_at") or data[-1].get("date_created")
         first = False
-    # attach lead_id if missing
     for it in items:
         it.setdefault("lead_id", lead_id)
     return items
@@ -231,10 +226,10 @@ def fetch_all_activities_for_lead(http, headers, lead_id: str) -> List[Dict[str,
 def fetch_lead_detail(http, headers, lead_id: str) -> Dict[str, Any]:
     return http_get(http, f"{API_BASE_URL}/lead/{lead_id}/", headers)
 
-def write_records(records: List[Dict[str, Any]], out_path: str, fmt: str):
+def write_records(records: List[Dict[str, Any]], out_path: str, fmt: str) -> int:
     if not records:
         return 0
-    # Convert small batch to Spark DF without driver OOM
+    # Make a small RDD of JSON strings, then read to a Spark DF
     rdd = spark.sparkContext.parallelize([json.dumps(r) for r in records])
     df = spark.read.json(rdd)
     now = F.current_timestamp()
@@ -252,32 +247,46 @@ def write_records(records: List[Dict[str, Any]], out_path: str, fmt: str):
 # Main
 # -----------------------
 def main():
-    api_key = get_api_key_from_secrets(SECRET_ID).strip()
-    auth_header = build_auth_header(api_key)
-    headers = {
-        "Authorization": auth_header,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "glue-close-ingest/1.0"
-    }
+    api_key = get_api_key_from_secret(SECRET_ID).strip()
+    headers = build_close_headers(api_key)
+    # log a masked fingerprint
+    print(f"Using Close API key len={len(api_key)} fingerprint={api_key[:4]}***{api_key[-3:]}")
+
     http = urllib3.PoolManager()
+    # Fail fast if auth is wrong
+    verify_auth(http, API_BASE_URL, headers)
 
-    # Date window to search leads (day-by-day)
+    # Date window
     today = dt.date.today()
-    start_day = dt.datetime.strptime(START_DATE, "%Y-%m-%d").date() if START_DATE else today
-    end_day   = dt.datetime.strptime(END_DATE,   "%Y-%m-%d").date() if END_DATE   else today
+    if START_DATE:
+        try:
+            start_day = dt.datetime.strptime(START_DATE, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"START_DATE must be YYYY-MM-DD, got {START_DATE!r}")
+    else:
+        start_day = today
 
-    print(f"[START] window={start_day}..{end_day} page_size={PAGE_SIZE} max_pages={MAX_PAGES} details={FETCH_LEAD_DETAILS} limit={LEAD_LIMIT}")
+    if END_DATE:
+        try:
+            end_day = dt.datetime.strptime(END_DATE, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError(f"END_DATE must be YYYY-MM-DD, got {END_DATE!r}")
+    else:
+        end_day = today
 
-    # 1) Gather lead IDs for the date window
+    print(f"[START] window={start_day}..{end_day} page_size={PAGE_SIZE} max_pages={MAX_PAGES} "
+          f"details={FETCH_LEAD_DETAILS} limit={LEAD_LIMIT}")
+
+    # 1) Gather lead IDs day-by-day
     all_leads: List[str] = []
     for day in date_range_days(start_day, end_day):
         ids = search_lead_ids_for_day(http, headers, day, PAGE_SIZE, MAX_PAGES)
         all_leads.extend(ids)
         print(f"[LEADS] day={day} fetched={len(ids)} total={len(all_leads)}")
+
     # de-dup while preserving order
     seen = set()
-    deduped = []
+    deduped: List[str] = []
     for lid in all_leads:
         if lid not in seen:
             seen.add(lid)
@@ -286,16 +295,15 @@ def main():
         deduped = deduped[:LEAD_LIMIT]
     print(f"[LEADS] unique={len(deduped)}")
 
-    # 2) For each lead: fetch activities (and optionally details)
+    # 2) Fetch activities (+ optional details) and write in chunks
     act_out = f"{S3_OUTPUT}activities/"
     lead_out = f"{S3_OUTPUT}leads/"
 
-    ACT_FLUSH_EVERY = 10000   # write every N activity records
-    LEAD_FLUSH_EVERY = 1000   # write every N lead details
+    ACT_FLUSH_EVERY = 10_000
+    LEAD_FLUSH_EVERY = 1_000
 
     act_buffer: List[Dict[str, Any]] = []
     lead_buffer: List[Dict[str, Any]] = []
-
     total_act = 0
     total_lead = 0
 
@@ -303,6 +311,7 @@ def main():
         try:
             acts = fetch_all_activities_for_lead(http, headers, lead_id)
             act_buffer.extend(acts)
+
             if FETCH_LEAD_DETAILS:
                 det = fetch_lead_detail(http, headers, lead_id)
                 lead_buffer.append(det)
@@ -338,6 +347,9 @@ def main():
 
     print(f"[DONE] total_activities={total_act} total_leads={total_lead}")
 
+# -----------------------
+# Entrypoint
+# -----------------------
 try:
     main()
     job.commit()
