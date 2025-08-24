@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: IAM Roles and Policies for Glue Jobs and S3 Bucket for LOAD data
+Description: IAM role for Glue and S3 bucket for Close/ELT data (least-priv + bucket hardening)
 
 Parameters:
   Environment:
@@ -8,14 +8,39 @@ Parameters:
   Prefix:
     Type: String
     Default: lead
+  # Name of the secret that holds {"api_key": "..."} (not the ARN).
+  # We wildcard the random suffix Secrets Manager appends.
+  ApiSecretName:
+    Type: String
+    Default: api_key_closeio-dev
+    Description: Secrets Manager name (not ARN), e.g. api_key_closeio-dev
 
 Resources:
 
   LOADBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub "${Prefix}-elt-${AWS::AccountId}-${Environment}"
- 
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256       # switch to aws:kms + a CMK if you prefer
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-elt-${AWS::AccountId}-${Environment}"
+
   GlueJobRole:
     Type: AWS::IAM::Role
     Properties:
@@ -27,45 +52,65 @@ Resources:
             Principal:
               Service: glue.amazonaws.com
             Action: sts:AssumeRole
+      # Keep the AWS-managed service role only; avoid console/full-access style policies
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
-        - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
-        - arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+      Path: "/"
 
-  GlueJobPolicy:
+  GlueJobAccessPolicy:
     Type: AWS::IAM::Policy
     Properties:
       PolicyName: !Sub "${Prefix}-glue-job-inline-${Environment}"
-      Roles:
-        - !Ref GlueJobRole
+      Roles: [ !Ref GlueJobRole ]
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
+          # ---- S3 least-privilege to this bucket ----
+          - Sid: S3BucketLevel
+            Effect: Allow
             Action:
-              - s3:*
+              - s3:ListBucket
+              - s3:GetBucketLocation
             Resource:
               - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}"
+          - Sid: S3ObjectLevel
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:AbortMultipartUpload
+              - s3:ListBucketMultipartUploads
+              - s3:ListMultipartUploadParts
+            Resource:
               - !Sub "arn:aws:s3:::${Prefix}-elt-${AWS::AccountId}-${Environment}/*"
-          - Effect: Allow
+
+          # ---- Read one secret (name wildcard handles the random suffix) ----
+          - Sid: ReadCloseApiSecret
+            Effect: Allow
             Action:
               - secretsmanager:GetSecretValue
               - secretsmanager:DescribeSecret
-              - secretsmanager:ListSecrets
-              - secretsmanager:TagResource
-            Resource: "*"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApiSecretName}*"
 
-        
+          # If your secret uses a CMK (or you switch S3 to SSE-KMS), allow decrypt via service
+          - Sid: KmsDecryptForSecretsManager
+            Effect: Allow
+            Action: kms:Decrypt
+            Resource: "*"   # scope via ViaService; least-priv for SM usage
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub "secretsmanager.${AWS::Region}.amazonaws.com"
+
 Outputs:
-
   GlueJobRoleArn:
+    Description: Glue job role ARN
     Value: !GetAtt GlueJobRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-GlueJobRoleArn"
 
   LOADBucketName:
+    Description: S3 bucket name for ELT artifacts
     Value: !Ref LOADBucket
     Export:
-      Name: loadBucketName
+      Name: !Sub "${AWS::StackName}-LOADBucketName"
