@@ -3,7 +3,7 @@
 
 import sys, json, time, datetime as dt, base64, traceback
 from typing import Dict, Any, Iterable, List, Optional
-
+import os
 import boto3
 import urllib3
 
@@ -56,31 +56,55 @@ job.init(args["JOB_NAME"], args)
 # -----------------------
 # Helpers
 # -----------------------
-def get_api_key_from_secrets(secret_id: str) -> str:
-    sm = boto3.client("secretsmanager")
-    val = sm.get_secret_value(SecretId=secret_id)
-    if "SecretString" in val:
-        txt = val["SecretString"]
-        try:
-            payload = json.loads(txt)
-            # support either {"api_key":"..."} or {"token":"..."} or a raw string
-            k = payload.get("api_key") or payload.get("token")
-            return k if k else txt
-        except Exception:
-            # raw string in SecretString
-            return txt
-    else:
-        return val["SecretBinary"].decode("utf-8")
 
-def build_auth_header(api_key: str) -> str:
-    # If the key looks like "key:anything" use Basic auth; otherwise use Bearer.
-    if ":" in api_key:
-        b64 = base64.b64encode(api_key.encode("utf-8")).decode("ascii")
-        return f"Basic {b64}"
-    return f"Bearer {api_key}"
 
-def backoff_sleep(attempt: int, base: float = 1.0, cap: float = 30.0):
-    time.sleep(min(cap, base * (2 ** attempt)))
+def get_api_key_from_secret(secret_id: str) -> str:
+    """Load Close API key from Secrets Manager.
+       Accepts either a raw string secret or JSON like {"api_key": "..."}."""
+    sm = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    s = sm.get_secret_value(SecretId=secret_id)["SecretString"]
+
+    key = None
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, dict):
+            key = parsed.get("api_key") or parsed.get("API_KEY")
+        elif isinstance(parsed, str):
+            key = parsed
+    except json.JSONDecodeError:
+        # Secret was a plain string
+        key = s
+
+    if not key:
+        raise RuntimeError(f"Secret {secret_id} did not contain an API key")
+
+    key = key.strip().strip('"').strip("'")
+    # If someone stored "key:" with a colon, strip it; we'll add the colon ourselves
+    if key.endswith(":"):
+        key = key[:-1]
+    if not key:
+        raise RuntimeError("API key from Secret is empty after normalization")
+    return key
+
+def build_close_headers(api_key: str) -> dict:
+    """Close v1 uses HTTP Basic with API_KEY as username and empty password."""
+    token = base64.b64encode(f"{api_key}:".encode("utf-8")).decode("ascii")
+    return {
+        "Authorization": f"Basic {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        # optional but helpful
+        "User-Agent": "glue-closeio-ingest/1.0"
+    }
+
+def verify_auth(http, base_url: str, headers: dict):
+    """Fail fast if credentials are wrong."""
+    url = base_url.rstrip("/") + "/me/"
+    resp = http.request("GET", url, headers=headers)
+    if resp.status != 200:
+        # Do not log the key; just the status / first bytes for debugging
+        raise RuntimeError(f"Auth check failed: GET {url} -> {resp.status} {resp.data[:200]!r}")
+
 
 def date_range_days(start_date: dt.date, end_date: dt.date) -> Iterable[dt.date]:
     cur = start_date
