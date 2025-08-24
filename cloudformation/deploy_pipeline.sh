@@ -4,10 +4,13 @@ set -euo pipefail
 # -------------------------
 # Configuration
 # -------------------------
-ENV="${ENV:-dev}"
-PREFIX="${PREFIX:-lead}"
-REGION="${REGION:-us-east-1}"
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+# Vars you already compute
+ENV="dev"
+PREFIX="lead"
+REGION="us-east-1"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+S3_BUCKET="${PREFIX}-elt-${ACCOUNT_ID}-${ENV}"
+API_SECRET_NAME="api_key_closeio-${ENV}"   # adjust if yours differs
 
 # Resources
 S3_BUCKET="${PREFIX}-elt-${ACCOUNT_ID}-${ENV}"
@@ -59,13 +62,18 @@ echo
 # Deploy IAM stack
 # -------------------------
 echo "Deploying ${IAM_STACK}..."
+echo "Deploying iam-stack..."
 aws cloudformation deploy \
   --stack-name "${IAM_STACK}" \
   --template-file "${CLOUDFORMATION_DIR}/01_iam.yml" \
   --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides Environment="${ENV}" Prefix="${PREFIX}" \
+  --no-fail-on-empty-changeset \
+  --parameter-overrides \
+    Environment="${ENV}" \
+    Prefix="${PREFIX}" \
+    ExistingBucketName="${S3_BUCKET}" \
+    ApiSecretName="${API_SECRET_NAME}" \
   --region "${REGION}"
-echo
 
 # -------------------------
 # Deploy Secrets stack (inject API key)
@@ -75,6 +83,7 @@ aws cloudformation deploy \
   --stack-name "${SECRETS_STACK}" \
   --template-file "${CLOUDFORMATION_DIR}/02_secrets.yml" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
   --parameter-overrides \
       Environment="${ENV}" \
       Prefix="${PREFIX}" \
