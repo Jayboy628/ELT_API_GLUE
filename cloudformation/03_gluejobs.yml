@@ -1,71 +1,73 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: Glue job to ingest Close data using API key in Secrets Manager
+Description: "Glue job to ingest Close leads/activities and write to S3 (JSON/Parquet)."
 
 Parameters:
   Prefix:
     Type: String
     Default: lead
+    Description: "Name prefix for resources (e.g., 'lead')."
+
   Environment:
     Type: String
     Default: dev
+    Description: "Deployment environment (e.g., dev/prod)."
+
   S3Bucket:
     Type: String
-    Default: lead-elt-657082399901-dev
+    Description: "Existing S3 bucket name that holds scripts and receives output."
+
   GlueJobRoleArn:
     Type: String
-    Default: arn:aws:iam::657082399901:role/lead-glue-job-role-dev
+    Description: "IAM role ARN for the Glue job."
 
-  # === Choose ONE of the following two approaches for SECRET_ID ===
-  # (A) Use the exported ARN from the secrets stack (recommended when stacks are separate)
-  ApiKeySecretArnExportName:
+  ApiSecretArn:
     Type: String
-    Default: secrets-stack-ApiKeySecretArn
-    Description: Export name to import the API key secret ARN from the Secrets stack
-  # (B) Or pass the secret NAME directly if you prefer (script accepts name as well)
-  ApiKeySecretName:
-    Type: String
-    Default: api_key_closeio-dev
-    Description: Optional: secret name; if non-empty, overrides the imported ARN
+    Description: "Secrets Manager ARN or name holding {\"api_key\":\"...\"}."
 
-  # App arguments you might want parametric
   ApiBaseUrl:
     Type: String
     Default: https://api.close.com/api/v1
-  S3OutputPrefix:
-    Type: String
-    Default: s3://lead-elt-657082399901-dev/landing/closeio/
+    Description: "Base URL for Close API."
+
   OutputFormat:
     Type: String
-    AllowedValues: [parquet, json]
     Default: parquet
-  StartDate:
-    Type: String
-    Default: ""     # e.g. 2025-08-22
-  EndDate:
-    Type: String
-    Default: ""     # e.g. 2025-08-23
+    AllowedValues: [parquet, json]
+    Description: "Output format to write to S3 (parquet|json)."
+
   PageSize:
     Type: Number
     Default: 200
+    Description: "Page size for Close search."
+
   MaxPages:
     Type: Number
     Default: 500
+    Description: "Safety cap on pages per search."
+
   FetchLeadDetails:
     Type: String
-    AllowedValues: ["true","false"]
     Default: "false"
+    AllowedValues: ["true","false"]
+    Description: "Whether to fetch per-lead detail documents."
+
+  StartDate:
+    Type: String
+    Default: ""
+    Description: "Optional inclusive start date (YYYY-MM-DD). Leave empty for yesterday."
+
+  EndDate:
+    Type: String
+    Default: ""
+    Description: "Optional inclusive end date (YYYY-MM-DD). Leave empty for today."
+
   LeadLimit:
     Type: Number
     Default: 0
-
-Mappings: {}
-
-Conditions:
-  UseNameInsteadOfArn: !Not [ !Equals [ !Ref ApiKeySecretName, "" ] ]
+    Description: "Optional cap on number of leads processed (0 = no cap)."
 
 Resources:
-
-  IngestJob:
+  CloseIngestJob:
     Type: AWS::Glue::Job
     Properties:
       Name: !Sub "${Prefix}-closeio-ingest-${Environment}"
@@ -75,36 +77,31 @@ Resources:
       WorkerType: G.1X
       Command:
         Name: glueetl
-        PythonVersion: "3"
-        # Update the script path if needed
+        PythonVersion: 3
         ScriptLocation: !Sub "s3://${S3Bucket}/scripts/closeio_ingest_glue.py"
       DefaultArguments:
         "--job-language": "python"
-        "--enable-continuous-cloudwatch-log": "true"
         "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
         "--enable-metrics": "true"
         "--TempDir": !Sub "s3://${S3Bucket}/temp/"
 
-        # === Script args (must all be strings) ===
-        "--SECRET_ID": !If
-          - UseNameInsteadOfArn
-          - !Ref ApiKeySecretName
-          - !ImportValue  # import the ARN from Secrets stack output
-            Fn::Sub: "${ApiKeySecretArnExportName}"
-
+        # app args (your Glue script reads these via getResolvedOptions)
+        "--SECRET_ID": !Ref ApiSecretArn
         "--API_BASE_URL": !Ref ApiBaseUrl
-        "--S3_OUTPUT":    !Ref S3OutputPrefix
+        "--S3_OUTPUT":  !Sub "s3://${S3Bucket}/landing/closeio/"
         "--OUTPUT_FORMAT": !Ref OutputFormat
-
-        # Optional knobs (empty strings are fine; script defaults will kick in)
-        "--START_DATE": !Ref StartDate
-        "--END_DATE":   !Ref EndDate
-        "--PAGE_SIZE":  !Ref PageSize
-        "--MAX_PAGES":  !Ref MaxPages
+        "--PAGE_SIZE": !Ref PageSize
+        "--MAX_PAGES": !Ref MaxPages
         "--FETCH_LEAD_DETAILS": !Ref FetchLeadDetails
+        "--START_DATE": !Ref StartDate
+        "--END_DATE": !Ref EndDate
         "--LEAD_LIMIT": !Ref LeadLimit
 
+        # job bookmarks don’t apply for REST pulls; keep disabled
+        "--job-bookmark-option": "job-bookmark-disable"
+
 Outputs:
-  IngestJobName:
-    Description: Name of the Glue Ingest job
-    Value: !Ref IngestJob
+  CloseIngestJobName:
+    Description: "Glue job name."
+    Value: !Ref CloseIngestJob
