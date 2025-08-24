@@ -22,11 +22,11 @@ Parameters:
 
   ApiSecretArn:
     Type: String
-    Description: "Secrets Manager ARN or name holding {\"api_key\":\"...\"}."
+    Description: "Secrets Manager ARN or name holding {'api_key':'...'}."
 
   ApiBaseUrl:
     Type: String
-    Default: https://api.close.com/api/v1
+    Default: "https://api.close.com/api/v1"
     Description: "Base URL for Close API."
 
   OutputFormat:
@@ -35,40 +35,46 @@ Parameters:
     AllowedValues: [parquet, json]
     Description: "Output format to write to S3 (parquet|json)."
 
+  Mode:
+    Type: String
+    Default: window
+    AllowedValues: [window, event]
+    Description: "Ingestion mode: 'window' (daily /activity slices) or 'event' (incremental via /event)."
+
   PageSize:
     Type: Number
     Default: 200
-    Description: "Page size for Close search."
+    Description: "Page size for Close API requests."
 
   MaxPages:
     Type: Number
     Default: 500
-    Description: "Safety cap on pages per search."
+    Description: "Safety cap on pages per search/day (window mode)."
 
   FetchLeadDetails:
     Type: String
     Default: "false"
     AllowedValues: ["true","false"]
-    Description: "Whether to fetch per-lead detail documents."
+    Description: "Whether to fetch per-lead detail documents (slower)."
 
   StartDate:
     Type: String
     Default: ""
-    Description: "Optional inclusive start date (YYYY-MM-DD). Leave empty for yesterday."
+    Description: "Optional inclusive start date (YYYY-MM-DD). Leave empty to use today."
 
   EndDate:
     Type: String
     Default: ""
-    Description: "Optional inclusive end date (YYYY-MM-DD). Leave empty for today."
+    Description: "Optional inclusive end date (YYYY-MM-DD). Leave empty to use today."
 
   LeadLimit:
     Type: Number
     Default: 0
-    Description: "Optional cap on number of leads processed (0 = no cap)."
+    Description: "Optional cap on number of records processed in window mode (0 = no cap)."
 
 Resources:
   CloseIngestJob:
-    Type: AWS::Glue::Job
+    Type: "AWS::Glue::Job"
     Properties:
       Name: !Sub "${Prefix}-closeio-ingest-${Environment}"
       Role: !Ref GlueJobRoleArn
@@ -86,19 +92,22 @@ Resources:
         "--enable-metrics": "true"
         "--TempDir": !Sub "s3://${S3Bucket}/temp/"
 
-        # app args (your Glue script reads these via getResolvedOptions)
+        # Script arguments (read via getResolvedOptions)
         "--SECRET_ID": !Ref ApiSecretArn
         "--API_BASE_URL": !Ref ApiBaseUrl
         "--S3_OUTPUT":  !Sub "s3://${S3Bucket}/landing/closeio/"
         "--OUTPUT_FORMAT": !Ref OutputFormat
+        "--MODE": !Ref Mode
         "--PAGE_SIZE": !Ref PageSize
         "--MAX_PAGES": !Ref MaxPages
         "--FETCH_LEAD_DETAILS": !Ref FetchLeadDetails
         "--START_DATE": !Ref StartDate
         "--END_DATE": !Ref EndDate
         "--LEAD_LIMIT": !Ref LeadLimit
+        "--MODE": !Ref Mode
+        "--CURSOR_S3": !Sub "s3://${S3Bucket}/landing/closeio/bookmarks/event_cursor.json"
 
-        # job bookmarks don’t apply for REST pulls; keep disabled
+        # Bookmarks not used for REST pulls
         "--job-bookmark-option": "job-bookmark-disable"
 
 Outputs:
