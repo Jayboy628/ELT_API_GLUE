@@ -40,23 +40,7 @@ echo "Glue Role ARN:  ${GLUE_JOB_ROLE_ARN}"
 echo "Secret Name:    ${SECRET_NAME}"
 echo
 
-# -------------------------
-# Ensure S3 bucket exists
-# -------------------------
-# echo "Checking S3 bucket s3://${S3_BUCKET}..."
-# if aws s3api head-bucket --bucket "${S3_BUCKET}" 2>/dev/null; then
-#   echo "Bucket exists."
-# else
-#   echo "Creating bucket..."
-#   # us-east-1 does not need LocationConstraint
-#   if [[ "${REGION}" == "us-east-1" ]]; then
-#     aws s3api create-bucket --bucket "${S3_BUCKET}"
-#   else
-#     aws s3api create-bucket --bucket "${S3_BUCKET}" \
-#       --create-bucket-configuration LocationConstraint="${REGION}"
-#   fi
-# fi
-# echo
+
 
 # -------------------------
 # Deploy IAM stack
@@ -91,6 +75,38 @@ aws cloudformation deploy \
       ApiKeyValue="${CLOSE_API_KEY}" \
   --region "${REGION}"
 echo
+
+# -------------------------
+# Ensure S3 bucket exists
+# -------------------------
+
+echo "Ensuring S3 bucket s3://${S3_BUCKET} exists..."
+if aws s3api head-bucket --bucket "${S3_BUCKET}" 2>/dev/null; then
+  echo "Bucket exists."
+else
+  echo "Creating bucket..."
+  if [[ "${REGION}" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "${S3_BUCKET}"
+  else
+    aws s3api create-bucket \
+      --bucket "${S3_BUCKET}" \
+      --create-bucket-configuration LocationConstraint="${REGION}"
+  fi
+
+  # optional hardening — safe to keep
+  aws s3api put-bucket-versioning \
+    --bucket "${S3_BUCKET}" \
+    --versioning-configuration Status=Enabled
+
+  aws s3api put-public-access-block \
+    --bucket "${S3_BUCKET}" \
+    --public-access-block-configuration \
+      BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+  # sanity check
+  aws s3api get-bucket-location --bucket "${S3_BUCKET}"
+fi
+
 
 # -------------------------
 # Upload Glue scripts
