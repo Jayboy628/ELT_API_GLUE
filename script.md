@@ -1,80 +1,96 @@
-# ELT_API_GLUE
-# Close.io → AWS Glue Ingest (README)
+Close.io → AWS Glue Ingest (README)
 
-This project contains a Glue ETL job `(closeio_ingest_glue.py)` that pulls leads and activities from the Close API and lands them in **S3** as **Parquet** or **JSON**, partitioned by ingestion date. The job reads the API key from AWS Secrets Manager, handles pagination and rate limits, and writes clean, queryable data to your data lake.
+This project contains a Glue ETL job (closeio_ingest_glue.py) that pulls leads and activities from the Close API and lands them in S3 as Parquet or JSON, partitioned by ingestion date. The job reads the API key from AWS Secrets Manager, handles pagination and rate limits, and writes clean, queryable data to your data lake.
+
+What this job does (high level)
+
+Auth: Reads your Close API key from Secrets Manager (either a plain string or {"api_key":"..."}).
+
+Verify: Calls GET /me/ once to fail fast if the key is wrong.
+
+Find leads updated in a date window: For each day in [START_DATE..END_DATE], calls POST /data/search/ with a fixed_local_date filter on date_updated to collect lead IDs (page size is capped at 200).
+
+Fetch activities per lead: For each lead ID, calls GET /activity?lead_id=... using cursor-by-time pagination and enforces Close’s limit ≤ 100.
+
+(Optional) Fetch lead details: If enabled, also pulls GET /lead/{id}.
+
+Write to S3: Batches are converted to Spark DataFrames and written to:
+
+s3://<bucket>/landing/closeio/activities/ingest_date=YYYY-MM-DD/
+
+s3://<bucket>/landing/closeio/leads/ingest_date=YYYY-MM-DD/ (only if enabled)
+
+Adds ingest_ts_utc and ingest_date columns.
+
+Files you’ll use
+
+closeio_ingest_glue.py — the Glue ETL script.
+
+cloudformation/01_iam.yml — creates the S3 bucket and Glue IAM role.
+
+cloudformation/02_secrets.yml — creates a Secrets Manager secret for the Close API key.
+
+cloudformation/03_gluejobs.yml — creates the Glue job pointing to the script in S3.
+
+cloudformation/deploy_pipeline.sh — helper to deploy the stacks and upload the script.
+
+.github/workflows/deploy.yml — CI workflow to run the deploy script (optional).
+
+Prerequisites
+
+AWS account & IAM permissions to create S3 buckets, Secrets, IAM roles, and Glue jobs.
+
+S3 bucket for scripts and output (the stack can create ${Prefix}-elt-${AccountId}-${Env}).
+
+Close API key (create it in Close and store via Secrets Manager stack).
+
+Secret format:
+
+Either a plain string:
+
+my_long_close_api_key_value
 
 
-### **What this job does (high level)**
+Or JSON:
 
-1. **Auth:** Reads your Close API key from Secrets Manager (either a plain string or `{"api_key":"..."})`.
-2. **Verify**: Calls `GET /me/` once to fail fast if the key is wrong.
-3. **Find leads updated in a date window:** For each day in `[START_DATE..END_DATE]`, calls POST `/data/search/` with a `fixed_local_date` filter on `date_updated` to collect **lead IDs** (page size is capped at 200).
-4. **Fetch activities per lead:** For each lead ID, calls `GET /activity?lead_id=...` using cursor-by-time **pagination** and enforces Close’s `limit ≤ 100`.
-5. (Optional) **Fetch lead details:** If enabled, also pulls `GET /lead/{id}`.
-6. **Write to S3:** Batches are converted to Spark DataFrames and written to:
-	- `s3://<bucket>/landing/closeio/activities/ingest_date=YYYY-MM-DD/`
-	- `s3://<bucket>/landing/closeio/leads/ingest_date=YYYY-MM-DD/` (only if enabled)
-	- **Adds** `ingest_ts_utc` and `ingest_date` columns.
-----
-#### Files you’ll use
-- closeio_ingest_glue.py — the Glue ETL script.
-- cloudformation/01_iam.yml — creates the S3 bucket and Glue IAM role.
-- cloudformation/02_secrets.yml — creates a Secrets Manager secret for the Close API key.
-- cloudformation/03_gluejobs.yml — creates the Glue job pointing to the script in S3.
-- cloudformation/deploy_pipeline.sh — helper to deploy the stacks and upload the script.
-- .github/workflows/deploy.yml — CI workflow to run the deploy script (optional).
-
-####**Prerequisites**
-
-- **AWS account & IAM permissions** to create S3 buckets, Secrets, IAM roles, and Glue jobs.
-- **S3 bucket** for scripts and output (the stack can create `${Prefix}-elt-${AccountId}-${Env})`.
-- **Close API** key (create it in Close and store via Secrets Manager stack).
-
-***Secret format:***
-
-- **Either a plain string:**
-
-`my_long_close_api_key_value`
-
-- **Or JSON:**
-
-`{"api_key": "my_long_close_api_key_value"}`
+{"api_key": "my_long_close_api_key_value"}
 
 
 The script supports both.
 
-----
+How to deploy
+Option A — Run the deploy script (local or CI)
 
-#####**How to deploy**
-**Option A — Run the deploy script (local or CI)**
+Set the secret value in your CI secrets as CLOSE_API_KEY (or export locally before running).
 
-1. Set the secret value in your CI secrets as CLOSE_API_KEY (or export locally before running).
-2. Run the deploy script:
+Run the deploy script:
 
-```python
 chmod +x cloudformation/deploy_pipeline.sh
 ./cloudformation/deploy_pipeline.sh
-```
 
 
 This will:
 
-- Create/update IAM stack (bucket + role)
-- Create/update Secrets stack (writes the API key into Secrets Manager)
-- Upload `closeio_ingest_glue.py` to `s3://<bucket>/scripts/`
-- Create/update the Glue job
+Create/update IAM stack (bucket + role)
 
-**Option B — Manual**
+Create/update Secrets stack (writes the API key into Secrets Manager)
 
-- Create the **S3 bucket** first (or use an existing one).
-- Deploy `01_iam.yml`, then `02_secrets.yml`, then `03_gluejobs.yml` with correct parameters.
-- Upload `closeio_ingest_glue.py` to `s3://<bucket>/scripts/`.
+Upload closeio_ingest_glue.py to s3://<bucket>/scripts/
 
-#####**Running the job**
+Create/update the Glue job
+
+Option B — Manual
+
+Create the S3 bucket first (or use an existing one).
+
+Deploy 01_iam.yml, then 02_secrets.yml, then 03_gluejobs.yml with correct parameters.
+
+Upload closeio_ingest_glue.py to s3://<bucket>/scripts/.
+
+Running the job
 
 You can run from the Glue console or the CLI. Example CLI:
 
-````bash
 aws glue start-job-run \
   --job-name lead-closeio-ingest-dev \
   --arguments '{
@@ -89,7 +105,7 @@ aws glue start-job-run \
     "--FETCH_LEAD_DETAILS": "false",
     "--LEAD_LIMIT": "0"
   }'
-````
+
 
 Required arguments
 
