@@ -115,7 +115,8 @@ s3://<bucket>/landing/closeio/
   leads/                      (only if FETCH_LEAD_DETAILS=true)
     ingest_date=2025-08-24/
       part-*.snappy.parquet
-```
+````
+
 
 Each file includes:
 
