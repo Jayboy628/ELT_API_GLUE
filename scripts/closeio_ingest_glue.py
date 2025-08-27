@@ -1,6 +1,3 @@
-# ==== Close.io → S3 (Glue Notebook, NO FUNCTIONS) ====
-# Glue 4.0 / PySpark. Pagination for leads + activities. API key from Secrets Manager.
-
 import os, json, time, base64, random, traceback, datetime as dt
 from typing import Dict, Any, List, Optional
 import boto3
