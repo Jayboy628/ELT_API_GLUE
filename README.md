@@ -117,6 +117,7 @@ s3://<bucket>/landing/closeio/
       part-*.snappy.parquet
 ````
 
+
 Each file includes:
 
 - All fields returned by Close
